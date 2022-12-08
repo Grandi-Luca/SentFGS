@@ -127,3 +127,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+slurm-*.out
+*.parsing.pt
+documents/*
+amrs_graph/*
+test_*
+
+.DS_Store
