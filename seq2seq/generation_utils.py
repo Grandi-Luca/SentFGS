@@ -1135,6 +1135,8 @@ def generate(
             if faithful_process is not None:
                 past_scores = faithful_process(input_ids[:, old_sequence_len:], past_scores)
 
+            print()
+            print('process penalty....')
             print(input_ids)
             print(past_scores)
             print()
@@ -1521,27 +1523,25 @@ def beam_search(
             eos_token_id=eos_token_id,
             beam_indices=beam_indices,
             out_cur_len=out_cur_len,
-            eop_tokens_id=eop_tokens_id,
-            batch_group_indices=batch_group_indices,
         )
 
         beam_scores = beam_outputs["next_beam_scores"]
         beam_next_tokens = beam_outputs["next_beam_tokens"]
         beam_idx = beam_outputs["next_beam_indices"]
         
-        print('**************************************')
-        print('scores:')
-        print(beam_scores)
-        print()
-        print('old input_ids:')
-        print(input_ids)
-        print()
-        print('new token:')
-        print(beam_next_tokens.unsqueeze(-1))
-        print()
-        print('indices:')
-        print(beam_idx)
-        print()
+        # print('**************************************')
+        # print('scores:')
+        # print(beam_scores)
+        # print()
+        # print('old input_ids:')
+        # print(input_ids)
+        # print()
+        # print('new token:')
+        # print(beam_next_tokens.unsqueeze(-1))
+        # print()
+        # print('indices:')
+        # print(beam_idx)
+        # print()
 
         input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
@@ -1557,7 +1557,13 @@ def beam_search(
         # increase cur_len
         cur_len = cur_len + 1
 
-        beam_scorer.is_beams_done_with_sentence(input_ids)
+        beam_scorer.is_beams_done_with_sentence(
+            input_ids, 
+            beam_scores, 
+            out_cur_len=out_cur_len,
+            eop_tokens_id=eop_tokens_id,
+            beam_indices=beam_indices,
+        )
 
         # beam search end condition
         if beam_scorer.is_done or stopping_criteria(input_ids, scores):

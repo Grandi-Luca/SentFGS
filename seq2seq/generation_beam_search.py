@@ -284,36 +284,6 @@ class BeamSearchScorer(BeamScorer):
                     next_beam_tokens[batch_idx, beam_idx] = next_token
                     next_beam_indices[batch_idx, beam_idx] = batch_beam_idx
                     
-                    # ##############################################
-                    # search end of sentence inside new sentence
-                    if (eop_tokens_id is not None) and (len(eop_tokens_id) > 0) and (out_cur_len is not None) and (batch_group_indices is not None):
-                        is_done = False
-                        num_sentence = 0
-                        new_sentence = torch.hstack((input_ids[batch_beam_idx, out_cur_len:].clone(), input_ids.new([next_token])))
-                        if len(new_sentence >= len(eop_tokens_id)):
-                            for i in range(len(new_sentence)-len(eop_tokens_id)+1):
-                                last_tokens = new_sentence[i:i+len(eop_tokens_id)]
-                                if last_tokens.equal(last_tokens.new(eop_tokens_id)):
-                                    num_sentence += 1
-                                    if num_sentence >= self._num_sentences_before_penalty:
-                                        # insert sentence if new token is eop
-                                        if i == len(new_sentence)-len(eop_tokens_id):
-                                            if beam_indices is not None:
-                                                beam_index = beam_indices[batch_beam_idx]
-                                                beam_index = beam_index + (batch_beam_idx,)
-                                            else:
-                                                beam_index = None
-
-                                            beam_hyp.add_sentence(
-                                                torch.hstack((input_ids[batch_beam_idx].clone(), input_ids.new([next_token]))),
-                                                next_score.item(),
-                                                beam_indices=beam_index,
-                                                hyp_length=len(new_sentence),
-                                            )
-                                        is_done = True
-                                        break
-                        beam_hyp._sentences_done[batch_group_indices[beam_idx]] = is_done
-                    
                     beam_idx += 1
                 
                 # once the beam for next step is full, don't add more tokens to it.
@@ -340,22 +310,60 @@ class BeamSearchScorer(BeamScorer):
         )
     
     # ###################################################################
-    def is_beams_done_with_sentence(self, input_ids: torch.LongTensor):
+    def is_beams_done_with_sentence(
+        self, 
+        input_ids: torch.LongTensor,
+        beam_scores: torch.FloatTensor,
+        out_cur_len: int,
+        eop_tokens_id: Optional[List[int]]=None,
+        beam_indices: Optional[torch.LongTensor] = None,
+    ):
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
-            if beam_hyp.is_sentences_done():
-                if not self._done[batch_idx]:
-                    sents = beam_hyp.sentence
-                    for i in range(self.num_beams):
-                        new_sentence = input_ids[i].clone()
-                        indices = np.where(np.array([new_sentence[:len(sentence[1])].equal(sentence[1]) for sentence in sents]) == True)[0]
-                        beam_hyp.add(
-                            sents[indices[0]][1],
-                            sents[indices[0]][0],
-                            beam_indices=sents[indices[0]][2],
-                            hyp_length=sents[indices[0]][3],
-                            is_from_eos=False,
-                        )
-                    self._done[batch_idx] = True
+            is_sentences_done = [False] * self.num_beams
+            # search for new sentences
+            for next_index in range(self.num_beams):
+                batch_beam_idx = batch_idx * self.num_beams + next_index
+                num_sentence = 0
+                if (eop_tokens_id is not None) and (len(eop_tokens_id) > 0) and (out_cur_len is not None):
+                    new_sentence = input_ids[batch_beam_idx, out_cur_len:]
+                    if len(new_sentence >= len(eop_tokens_id)):
+                        # search for the sequence of eops inside new sentence
+                        for i in range(len(new_sentence)-len(eop_tokens_id)+1):
+                            last_tokens = new_sentence[i:i+len(eop_tokens_id)]
+                            if last_tokens.equal(last_tokens.new(eop_tokens_id)):
+                                num_sentence += 1
+                                # check if have been generated num_sentences before apply faithfulty penalty
+                                if num_sentence >= self._num_sentences_before_penalty:
+                                    # insert sentence if new tokens are eops
+                                    if i == len(new_sentence)-len(eop_tokens_id):
+                                        if beam_indices is not None:
+                                            beam_index = beam_indices[batch_beam_idx]
+                                            beam_index = beam_index + (batch_beam_idx,)
+                                        else:
+                                            beam_index = None
+
+                                        beam_hyp.add_sentence(
+                                            input_ids[batch_beam_idx].clone(),
+                                            beam_scores[batch_beam_idx].clone().item(),
+                                            beam_indices=beam_index,
+                                            hyp_length=len(new_sentence),
+                                        )
+                                    is_sentences_done[next_index] = True
+                                    break
+
+            if all(is_sentences_done) and not (self._done[batch_idx]):
+                sents = beam_hyp.sentence
+                for i in range(self.num_beams):
+                    new_sentence = input_ids[i].clone()
+                    indices = np.where(np.array([new_sentence[:len(sentence[1])].equal(sentence[1]) for sentence in sents]) == True)[0]
+                    beam_hyp.add(
+                        sents[indices[0]][1],
+                        sents[indices[0]][0],
+                        beam_indices=sents[indices[0]][2],
+                        hyp_length=sents[indices[0]][3],
+                        is_from_eos=False,
+                    )
+                self._done[batch_idx] = True
 
     def finalize(
         self,
@@ -923,7 +931,6 @@ class BeamHypotheses:
         self.num_beams = num_beams
         self.beams = []
         self.sentence = []
-        self._sentences_done: List[bool] = [False] * num_beams 
         self.worst_score = 1e9
 
     def __len__(self):
@@ -949,9 +956,6 @@ class BeamHypotheses:
 
     def add_sentence(self, hyp: torch.LongTensor, sum_logprobs: float, beam_indices: Optional[torch.LongTensor] = None, hyp_length: Optional[int] = None):
         self.sentence.append((sum_logprobs, hyp, beam_indices, hyp_length))
-
-    def is_sentences_done(self):
-        return all(self._sentences_done)
 
     def is_done(self, best_sum_logprobs: float, cur_len: int) -> bool:
         """
