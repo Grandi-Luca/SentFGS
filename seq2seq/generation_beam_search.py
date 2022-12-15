@@ -21,9 +21,10 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from seq2seq.generation_beam_constraints import Constraint, ConstraintListState
-from seq2seq.utils import add_start_docstrings
+from transformers.generation_beam_constraints import Constraint, ConstraintListState
+from transformers.utils import add_start_docstrings
 
+from seq2seq.sentence_utils import is_sentence_done
 
 PROCESS_INPUTS_DOCSTRING = r"""
     Args:
@@ -200,8 +201,6 @@ class BeamSearchScorer(BeamScorer):
                 "`max_length` should be passed directly to `beam_search(...)`, `beam_sample(...)`"
                 ", or `group_beam_search(...)`."
             )
-        
-        self._num_sentences_before_penalty = kwargs.get("num_sentences_before_penalty", 1)
 
     @property
     def is_done(self) -> bool:
@@ -218,9 +217,7 @@ class BeamSearchScorer(BeamScorer):
         beam_indices: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor]:
-        eop_tokens_id: Optional[List[int]] = kwargs.get("eop_tokens_id", None)
         out_cur_len: Optional[int] = kwargs.get("out_cur_len", None)
-        batch_group_indices: Optional[List[int]] = kwargs.get("batch_group_indices", None)
 
         cur_len = input_ids.shape[-1]
         batch_size = len(self._beam_hyps)
@@ -275,7 +272,6 @@ class BeamSearchScorer(BeamScorer):
                         input_ids[batch_beam_idx].clone(),
                         next_score.item(),
                         beam_indices=beam_index,
-                        hyp_length=len(input_ids[batch_beam_idx, out_cur_len:])
                     )
                     
                 else:
@@ -309,62 +305,6 @@ class BeamSearchScorer(BeamScorer):
             }
         )
     
-    # ###################################################################
-    def is_beams_done_with_sentence(
-        self, 
-        input_ids: torch.LongTensor,
-        beam_scores: torch.FloatTensor,
-        out_cur_len: int,
-        eop_tokens_id: Optional[List[int]]=None,
-        beam_indices: Optional[torch.LongTensor] = None,
-    ):
-        for batch_idx, beam_hyp in enumerate(self._beam_hyps):
-            is_sentences_done = [False] * self.num_beams
-            # search for new sentences
-            for next_index in range(self.num_beams):
-                batch_beam_idx = batch_idx * self.num_beams + next_index
-                num_sentence = 0
-                if (eop_tokens_id is not None) and (len(eop_tokens_id) > 0) and (out_cur_len is not None):
-                    new_sentence = input_ids[batch_beam_idx, out_cur_len:]
-                    if len(new_sentence >= len(eop_tokens_id)):
-                        # search for the sequence of eops inside new sentence
-                        for i in range(len(new_sentence)-len(eop_tokens_id)+1):
-                            last_tokens = new_sentence[i:i+len(eop_tokens_id)]
-                            if last_tokens.equal(last_tokens.new(eop_tokens_id)):
-                                num_sentence += 1
-                                # check if have been generated num_sentences before apply faithfulty penalty
-                                if num_sentence >= self._num_sentences_before_penalty:
-                                    # insert sentence if new tokens are eops
-                                    if i == len(new_sentence)-len(eop_tokens_id):
-                                        if beam_indices is not None:
-                                            beam_index = beam_indices[batch_beam_idx]
-                                            beam_index = beam_index + (batch_beam_idx,)
-                                        else:
-                                            beam_index = None
-
-                                        beam_hyp.add_sentence(
-                                            input_ids[batch_beam_idx].clone(),
-                                            beam_scores[batch_beam_idx].clone().item(),
-                                            beam_indices=beam_index,
-                                            hyp_length=len(new_sentence),
-                                        )
-                                    is_sentences_done[next_index] = True
-                                    break
-
-            if all(is_sentences_done) and not (self._done[batch_idx]):
-                sents = beam_hyp.sentence
-                for i in range(self.num_beams):
-                    new_sentence = input_ids[i].clone()
-                    indices = np.where(np.array([new_sentence[:len(sentence[1])].equal(sentence[1]) for sentence in sents]) == True)[0]
-                    beam_hyp.add(
-                        sents[indices[0]][1],
-                        sents[indices[0]][0],
-                        beam_indices=sents[indices[0]][2],
-                        hyp_length=sents[indices[0]][3],
-                        is_from_eos=False,
-                    )
-                self._done[batch_idx] = True
-
     def finalize(
         self,
         input_ids: torch.LongTensor,
@@ -375,7 +315,9 @@ class BeamSearchScorer(BeamScorer):
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
         beam_indices: Optional[torch.LongTensor] = None,
+        **kwargs
     ) -> Tuple[torch.LongTensor]:
+        out_cur_len = kwargs.get("out_cur_len", 0)
         batch_size = len(self._beam_hyps)
 
         # finalize all open beam hypotheses and add to generated hypotheses
@@ -390,15 +332,13 @@ class BeamSearchScorer(BeamScorer):
                 final_score = final_beam_scores[batch_beam_idx].item()
                 final_tokens = input_ids[batch_beam_idx]
                 beam_index = beam_indices[batch_beam_idx] if beam_indices is not None else None
-                beam_hyp.add(final_tokens, final_score, beam_indices=beam_index)
+                beam_hyp.add(final_tokens, final_score, beam_indices=beam_index, hyp_length=len(final_tokens[out_cur_len:]))
 
         # select the best hypotheses
         sent_lengths = input_ids.new(batch_size * self.num_beam_hyps_to_keep)
         best = []
         best_indices = []
         best_scores = torch.zeros(batch_size * self.num_beam_hyps_to_keep, device=self.device, dtype=torch.float32)
-
-        is_from_eos = []
 
         # retrieve best hypotheses
         for i, beam_hyp in enumerate(self._beam_hyps):
@@ -417,8 +357,6 @@ class BeamSearchScorer(BeamScorer):
                 best_indices.append(best_index)
 
                 best_scores[i * self.num_beam_hyps_to_keep + j] = best_score
-
-                is_from_eos.append(best_hyp_tuple[3])
 
         # prepare for adding eos
         sent_lengths_max = sent_lengths.max().item() + 1
@@ -453,7 +391,6 @@ class BeamSearchScorer(BeamScorer):
                 "sequences": decoded,
                 "sequence_scores": best_scores,
                 "beam_indices": indices,
-                "is_from_eos": is_from_eos,
             }
         )
 
@@ -939,23 +876,20 @@ class BeamHypotheses:
         """
         return len(self.beams)
 
-    def add(self, hyp: torch.LongTensor, sum_logprobs: float, beam_indices: Optional[torch.LongTensor] = None, hyp_length: Optional[int] = None, is_from_eos :bool = True):
+    def add(self, hyp: torch.LongTensor, sum_logprobs: float, beam_indices: Optional[torch.LongTensor] = None, hyp_length: Optional[int] = None):
         """
         Add a new hypothesis to the list.
         """
         hyp_length = hyp_length if hyp_length is not None else hyp.shape[-1]
         score = sum_logprobs / (hyp_length ** self.length_penalty) if hyp_length > 0 else sum_logprobs
         if len(self) < self.num_beams or score > self.worst_score:
-            self.beams.append((score, hyp, beam_indices, is_from_eos))
+            self.beams.append((score, hyp, beam_indices))
             if len(self) > self.num_beams:
                 sorted_next_scores = sorted([(s, idx) for idx, (s, _, _) in enumerate(self.beams)])
                 del self.beams[sorted_next_scores[0][1]]
                 self.worst_score = sorted_next_scores[1][0]
             else:
                 self.worst_score = min(score, self.worst_score)
-
-    def add_sentence(self, hyp: torch.LongTensor, sum_logprobs: float, beam_indices: Optional[torch.LongTensor] = None, hyp_length: Optional[int] = None):
-        self.sentence.append((sum_logprobs, hyp, beam_indices, hyp_length))
 
     def is_done(self, best_sum_logprobs: float, cur_len: int) -> bool:
         """

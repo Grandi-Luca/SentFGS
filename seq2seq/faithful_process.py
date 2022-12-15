@@ -1,11 +1,11 @@
 import torch
 from typing import Any, Optional
+from transformers.generation_logits_process import LogitsProcessor
 from seq2seq.metrics import Metric, WWLK
-from seq2seq.generation_logits_process import LogitsProcessor
 from seq2seq.sentence_utils import ConverterSentenceToAMR, SpringConverter
 
 import spacy
-import re
+
 
 def to_sentences(doc:str, nlp = None):
     sents = doc.strip().split('\n')

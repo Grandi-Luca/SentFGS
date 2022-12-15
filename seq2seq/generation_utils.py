@@ -19,15 +19,14 @@ import inspect
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
-import logging
 
 import torch
 import torch.distributed as dist
 from torch import nn
 
-from seq2seq.generation_beam_constraints import Constraint, DisjunctiveConstraint, PhrasalConstraint
+from transformers.generation_beam_constraints import Constraint, DisjunctiveConstraint, PhrasalConstraint
 from seq2seq.generation_beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
-from seq2seq.generation_logits_process import (
+from transformers.generation_logits_process import (
     EncoderNoRepeatNGramLogitsProcessor,
     ExponentialDecayLengthPenalty,
     ForcedBOSTokenLogitsProcessor,
@@ -50,7 +49,7 @@ from seq2seq.generation_logits_process import (
     TypicalLogitsWarper,
 )
 
-from seq2seq.generation_stopping_criteria import (
+from transformers.generation_stopping_criteria import (
     MaxLengthCriteria,
     MaxTimeCriteria,
     StoppingCriteria,
@@ -58,15 +57,16 @@ from seq2seq.generation_stopping_criteria import (
     validate_stopping_criteria,
 )
 
-from seq2seq.pytorch_utils import torch_int_div
-from seq2seq.utils import ModelOutput
+from transformers.pytorch_utils import torch_int_div
+from transformers.utils import ModelOutput, logging
 
 from seq2seq.faithful_process import FaithfulProcess
 from seq2seq.metrics import Metric
+from seq2seq.stopping_criteria import MultiBatchEndSentenceCriteria
+from seq2seq.sentence_utils import is_sentence_done
 
-import copy
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 
 @dataclass
 class BeamSearchDecoderOnlyOutput(ModelOutput):
@@ -647,7 +647,6 @@ def generate(
     **model_kwargs,
 )->Union[GenerateOutput, torch.LongTensor]:
     r"""
-
     Generates sequences of token ids for models with a language modeling head. The method supports the following
     generation methods for text-decoder, text-to-text, speech-to-text, and vision-to-text models:
         - *greedy decoding* by calling [`~generation_utils.GenerationMixin.greedy_search`] if `num_beams=1` and
@@ -896,7 +895,6 @@ def generate(
     amrs_input_path:Optional[str] = model_kwargs.pop("amrs_input_path", None)
     metric:Optional[Metric] = model_kwargs.pop("metric", None)
     faithful_penalty:Optional[float] = model_kwargs.pop("faithful_penalty", None)
-    eop_tokens_id: Optional[List[int]] = model_kwargs.pop("eop_tokens_id", None)
     num_sentences_before_penalty: Optional[int] = model_kwargs.pop("num_sentences_before_penalty", None)
 
     # 2. Define model inputs
@@ -1096,6 +1094,8 @@ def generate(
             input_ids, expand_size=num_beams, is_encoder_decoder=model.config.is_encoder_decoder, **model_kwargs
         )
 
+        stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
+
         past_scores = None
         while input_ids.shape[-1] < max_length:
 
@@ -1111,7 +1111,7 @@ def generate(
             )
 
             # 12. run beam search
-            bs, is_from_eos = beam_search(
+            bs = beam_search(
                 model,
                 input_ids,
                 beam_scorer,
@@ -1123,7 +1123,7 @@ def generate(
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
                 past_scores=past_scores,
-                eop_tokens_id=eop_tokens_id,
+                tokenizer=tokenizer,
                 **model_kwargs,
             )
             # process new sentence
@@ -1135,27 +1135,28 @@ def generate(
             if faithful_process is not None:
                 past_scores = faithful_process(input_ids[:, old_sequence_len:], past_scores)
 
-            print()
-            print('process penalty....')
-            print(input_ids)
-            print(past_scores)
-            print()
+            print('*'*100)
+            print('sentences complete\n')
+            for idx in input_ids:
+                print(tokenizer.decode(idx))
+            print('*'*100)
 
-            predicted_sentences = [[sequence_ids, score, from_eos] for sequence_ids, score, from_eos in zip(input_ids.clone(), past_scores.clone(), is_from_eos)]
+            predicted_sentences = [[sequence_ids, score] for sequence_ids, score in zip(input_ids.clone(), past_scores.clone())]
             sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[1], reverse=True)
             best_hyp = sorted_predicted_sentences[0]
-            
+
             # check if the eos of best hypotesis came from decoding step or if it has been added in finalize step
-            if (input_ids.shape[-1] < max_length) or (not best_hyp[-1]):
-                # remove pad token from best hyp
-                pad_indices = (best_hyp[0]==pad_token_id).nonzero().flatten().tolist()
-                if len(pad_indices) > 0:
-                    best_hyp[0] = best_hyp[0][:pad_indices[0]]
-                
-                # replace all beam sequence with the best sequence and remove eos token if cur_len < max_length - 1
-                if best_hyp[0][:-1].shape[-1] < max_length - 1:
-                    input_ids = best_hyp[0][:-1].repeat(num_beams, 1)
-                    continue
+            if input_ids[:-1].shape[-1] < max_length - 1:
+                # cut off pad and eos ids
+                pad_mask = best_hyp[0]==pad_token_id
+                eos_mask = best_hyp[0]==eos_token_id
+                comb_mask = pad_mask.logical_or(eos_mask)
+                last_valid_idx = (comb_mask == False).nonzero()[-1][-1].item() 
+                curr_gen_ids = best_hyp[0][:last_valid_idx+1]
+
+                # replace all beam sequence with the best sequence
+                input_ids = curr_gen_ids.repeat(num_beams, 1)
+                continue
 
             input_ids = input_ids.new([sent[0].tolist() for sent in sorted_predicted_sentences])
             past_scores = past_scores.new([sent[1].item() for sent in sorted_predicted_sentences])
@@ -1193,6 +1194,8 @@ def generate(
             input_ids, expand_size=num_beams, is_encoder_decoder=model.config.is_encoder_decoder, **model_kwargs
         )
 
+        stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
+
         past_scores = None
         while input_ids.shape[-1] < max_length:
 
@@ -1208,7 +1211,7 @@ def generate(
             )
 
             # 12. run beam search
-            diverse_bs, is_from_eos = group_beam_search(
+            diverse_bs = group_beam_search(
                 model,
                 input_ids,
                 beam_scorer,
@@ -1220,7 +1223,7 @@ def generate(
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
                 past_scores=past_scores,
-                eop_tokens_id=eop_tokens_id,
+                tokenizer=tokenizer,
                 **model_kwargs,
             )
             
@@ -1232,22 +1235,29 @@ def generate(
             if faithful_process is not None:
                 past_scores = faithful_process(input_ids[:, old_sequence_len:], past_scores)
 
-            predicted_sentences = [[sequence_ids, score, from_eos] for sequence_ids, score, from_eos in zip(input_ids.clone(), past_scores.clone(), is_from_eos)]
+            print('*'*100)
+            print('sentences complete\n')
+            for idx in input_ids:
+                print(tokenizer.decode(idx))
+            print('*'*100)
+
+            predicted_sentences = [[sequence_ids, score] for sequence_ids, score in zip(input_ids.clone(), past_scores.clone())]
             sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[1], reverse=True)
             best_hyp = sorted_predicted_sentences[0]
-            
+
             # check if the eos of best hypotesis came from decoding step or if it has been added in finalize step
-            if (input_ids.shape[-1] < max_length) or (not best_hyp[-1]):
-                # remove pad token from best hyp
-                pad_indices = (best_hyp[0]==pad_token_id).nonzero().flatten().tolist()
-                if len(pad_indices) > 0:
-                    best_hyp[0] = best_hyp[0][:pad_indices[0]]
-                
-                # replace all beam sequence with the best sequence and remove eos token if cur_len < max_length - 1
-                if best_hyp[0][:-1].shape[-1] < max_length - 1:
-                    input_ids = best_hyp[0][:-1].repeat(num_beams, 1)
-                    continue
-              
+            if input_ids[:-1].shape[-1] < max_length - 1:
+                # cut off pad and eos ids
+                pad_mask = best_hyp[0]==pad_token_id
+                eos_mask = best_hyp[0]==eos_token_id
+                comb_mask = pad_mask.logical_or(eos_mask)
+                last_valid_idx = (comb_mask == False).nonzero()[-1][-1].item() 
+                curr_gen_ids = best_hyp[0][:last_valid_idx+1]
+
+                # replace all beam sequence with the best sequence
+                input_ids = curr_gen_ids.repeat(num_beams, 1)
+                continue
+
             input_ids = input_ids.new([sent[0].tolist() for sent in sorted_predicted_sentences])
             past_scores = past_scores.new([sent[1].item() for sent in sorted_predicted_sentences])
 
@@ -1273,7 +1283,6 @@ def beam_search(
     model,
     input_ids: torch.LongTensor,
     beam_scorer: BeamScorer,
-    past_scores,
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
     max_length: Optional[int] = None,
@@ -1387,8 +1396,9 @@ def beam_search(
 
     batch_beam_size, cur_len = input_ids.shape
     ##################################
-    eop_tokens_id = model_kwargs.pop("eop_tokens_id", None)
     out_cur_len = cur_len
+    past_scores = model_kwargs.pop("past_scores", None)
+    tokenizer = model_kwargs.pop("tokenizer", None)
 
     if num_beams * batch_size != batch_beam_size:
         raise ValueError(
@@ -1421,6 +1431,9 @@ def beam_search(
     else:
         beam_scores = past_scores
         beam_scores[1:] = -1e9
+
+    # SentBS: flag to detect if a new sentence is produced
+    prev_sent_end = True # avoid take previous sentence as new generated sentence
     
     this_peer_finished = False  # used by synced_gpus only
     while True:
@@ -1450,12 +1463,6 @@ def beam_search(
         if synced_gpus and this_peer_finished:
             cur_len = cur_len + 1
             continue  # don't waste resources running the code we don't need
-
-        batch_group_indices = []
-        for batch_idx in range(batch_size):
-            batch_group_indices.extend(
-                [idx for idx in range(num_beams)]
-            )
 
         # vocabulary distribution probability for each beam
         next_token_logits = outputs.logits[:, -1, :]
@@ -1529,21 +1536,18 @@ def beam_search(
         beam_next_tokens = beam_outputs["next_beam_tokens"]
         beam_idx = beam_outputs["next_beam_indices"]
         
-        # print('**************************************')
-        # print('scores:')
-        # print(beam_scores)
-        # print()
-        # print('old input_ids:')
-        # print(input_ids)
-        # print()
-        # print('new token:')
-        # print(beam_next_tokens.unsqueeze(-1))
-        # print()
-        # print('indices:')
-        # print(beam_idx)
-        # print()
-
         input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
+
+        if prev_sent_end:
+            prev_sent_end = False
+        else:
+            # SentBS: if previously sentence has ended, change new token to pad_token_id
+            assert input_ids.dim() == 2 and tokenizer is not None # size [num_return_sequences, gen_len]
+            for batch_idx in range(input_ids.size(0)):
+                if (len(input_ids[batch_idx]) > 1) and (input_ids[batch_idx][-2] == pad_token_id) or is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
+                    input_ids[batch_idx][-1] = pad_token_id
+                if is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
+                    input_ids[batch_idx][-1] = pad_token_id
 
         model_kwargs = _update_model_kwargs_for_generation(
             outputs, model_kwargs=model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder
@@ -1556,14 +1560,6 @@ def beam_search(
 
         # increase cur_len
         cur_len = cur_len + 1
-
-        beam_scorer.is_beams_done_with_sentence(
-            input_ids, 
-            beam_scores, 
-            out_cur_len=out_cur_len,
-            eop_tokens_id=eop_tokens_id,
-            beam_indices=beam_indices,
-        )
 
         # beam search end condition
         if beam_scorer.is_done or stopping_criteria(input_ids, scores):
@@ -1599,7 +1595,7 @@ def beam_search(
                 decoder_attentions=decoder_attentions,
                 cross_attentions=cross_attentions,
                 decoder_hidden_states=decoder_hidden_states,
-            ), sequence_outputs['is_from_eos']
+            )
         else:
             return BeamSearchDecoderOnlyOutput(
                 sequences=sequence_outputs["sequences"],
@@ -1608,9 +1604,9 @@ def beam_search(
                 beam_indices=sequence_outputs["beam_indices"],
                 attentions=decoder_attentions,
                 hidden_states=decoder_hidden_states,
-            ), sequence_outputs['is_from_eos']
+            )
     else:
-        return sequence_outputs["sequences"], sequence_outputs['is_from_eos']
+        return sequence_outputs["sequences"]
 
 def group_beam_search(
     model,
@@ -1742,9 +1738,9 @@ def group_beam_search(
 
     batch_beam_size, cur_len = input_ids.shape
     ##################################
-    eop_tokens_id = model_kwargs.pop("eop_tokens_id", None)
     out_cur_len = cur_len
     past_scores = model_kwargs.pop("past_scores", None)
+    tokenizer = model_kwargs.pop("tokenizer", None)
 
     if return_dict_in_generate and output_scores:
         beam_indices = [tuple(() for _ in range(num_sub_beams * batch_size)) for _ in range(num_beam_groups)]
@@ -1779,6 +1775,9 @@ def group_beam_search(
         beam_scores = torch.full((batch_size, num_beams), -1e9, dtype=torch.float, device=device)
         beam_scores[:, ::num_sub_beams] = past_scores[0]
         beam_scores = beam_scores.view((batch_size * num_beams,))
+
+    # SentBS: flag to detect if a new sentence is produced
+    prev_sent_end = True # avoid take previous sentence as new generated sentence
 
     this_peer_finished = False  # used by synced_gpus only
     while True:
@@ -1853,7 +1852,7 @@ def group_beam_search(
 
             # Sample 2 next tokens for each beam (so we have some spare tokens and match output of beam search)
             next_token_scores, next_tokens = torch.topk(
-                next_token_scores, 2 * group_size, dim=1, largest=True, sorted=True
+                next_token_scores, 2 * group_size, dim=1, largest=True, sorted=True     
             )
 
             next_indices = torch_int_div(next_tokens, vocab_size)
@@ -1869,10 +1868,9 @@ def group_beam_search(
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
                 beam_indices=process_beam_indices,
-                eop_tokens_id=eop_tokens_id,
                 out_cur_len=out_cur_len,
-                batch_group_indices=batch_group_indices,
             )
+
             beam_scores[batch_group_indices] = beam_outputs["next_beam_scores"]
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
@@ -1909,24 +1907,20 @@ def group_beam_search(
                     if model.config.is_encoder_decoder
                     else (outputs.hidden_states,)
                 )
-        
-        print('**************************************')
-        print('scores:')
-        print(beam_scores)
-        print()
-        print('old input_ids:')
-        print(input_ids)
-        print()
-        print('new token:')
-        print(current_tokens.unsqueeze(-1))
-        print()
 
         input_ids = torch.cat([input_ids, current_tokens.unsqueeze(-1)], dim=-1)
 
-        print('new input_ids')
-        print(input_ids)
-        print()
-
+        if prev_sent_end:
+            prev_sent_end = False
+        else:
+            # SentBS: if previously sentence has ended, change new token to pad_token_id
+            assert input_ids.dim() == 2 and tokenizer is not None # size [num_return_sequences, gen_len]
+            for batch_idx in range(input_ids.size(0)):
+                if (len(input_ids[batch_idx]) > 1) and (input_ids[batch_idx][-2] == pad_token_id) or is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
+                    input_ids[batch_idx][-1] = pad_token_id
+                if is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
+                    input_ids[batch_idx][-1] = pad_token_id
+        
         model_kwargs = model._update_model_kwargs_for_generation(
             outputs, model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder
         )
@@ -1935,10 +1929,6 @@ def group_beam_search(
 
         # increase cur_len
         cur_len = cur_len + 1
-
-        print(f'len: {cur_len}')
-
-        beam_scorer.is_beams_done_with_sentence(input_ids)
 
         if beam_scorer.is_done or stopping_criteria(input_ids, scores):
             if not synced_gpus:
@@ -1956,6 +1946,7 @@ def group_beam_search(
         eos_token_id=eos_token_id,
         max_length=stopping_criteria.max_length,
         beam_indices=final_beam_indices,
+        out_cur_len=out_cur_len,
     )
 
     if return_dict_in_generate:
@@ -1973,7 +1964,7 @@ def group_beam_search(
                 decoder_attentions=decoder_attentions,
                 cross_attentions=cross_attentions,
                 decoder_hidden_states=decoder_hidden_states,
-            ), sequence_outputs['is_from_eos']
+            )
         else:
             return BeamSearchDecoderOnlyOutput(
                 sequences=sequence_outputs["sequences"],
@@ -1982,6 +1973,6 @@ def group_beam_search(
                 beam_indices=sequence_outputs["beam_indices"],
                 attentions=decoder_attentions,
                 hidden_states=decoder_hidden_states,
-            ), sequence_outputs['is_from_eos']
+            )
     else:
-        return sequence_outputs["sequences"], sequence_outputs['is_from_eos']
+        return sequence_outputs["sequences"]
