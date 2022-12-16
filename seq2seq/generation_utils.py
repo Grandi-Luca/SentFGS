@@ -1107,7 +1107,7 @@ def generate(
                 length_penalty=length_penalty,
                 do_early_stopping=early_stopping,
                 num_beam_hyps_to_keep=num_beams,
-                num_sentences_before_penalty=num_sentences_before_penalty,
+                tokenizer=tokenizer,
             )
 
             # 12. run beam search
@@ -1123,7 +1123,6 @@ def generate(
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
                 past_scores=past_scores,
-                tokenizer=tokenizer,
                 **model_kwargs,
             )
             # process new sentence
@@ -1208,6 +1207,7 @@ def generate(
                 do_early_stopping=early_stopping,
                 num_beam_hyps_to_keep=num_beams,
                 num_beam_groups=num_beam_groups,
+                tokenizer=tokenizer,
             )
 
             # 12. run beam search
@@ -1223,7 +1223,6 @@ def generate(
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
                 past_scores=past_scores,
-                tokenizer=tokenizer,
                 **model_kwargs,
             )
             
@@ -1398,7 +1397,6 @@ def beam_search(
     ##################################
     out_cur_len = cur_len
     past_scores = model_kwargs.pop("past_scores", None)
-    tokenizer = model_kwargs.pop("tokenizer", None)
 
     if num_beams * batch_size != batch_beam_size:
         raise ValueError(
@@ -1459,6 +1457,9 @@ def beam_search(
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
+
+        # store score before decoding step
+        scores_before_decoding = beam_scores.clone()
 
         if synced_gpus and this_peer_finished:
             cur_len = cur_len + 1
@@ -1538,16 +1539,6 @@ def beam_search(
         
         input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
-        if prev_sent_end:
-            prev_sent_end = False
-        else:
-            # SentBS: if previously sentence has ended, change new token to pad_token_id
-            assert input_ids.dim() == 2 and tokenizer is not None # size [num_return_sequences, gen_len]
-            for batch_idx in range(input_ids.size(0)):
-                if (len(input_ids[batch_idx]) > 1) and (input_ids[batch_idx][-2] == pad_token_id) or is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
-                    input_ids[batch_idx][-1] = pad_token_id
-                if is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
-                    input_ids[batch_idx][-1] = pad_token_id
 
         model_kwargs = _update_model_kwargs_for_generation(
             outputs, model_kwargs=model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder
@@ -1561,13 +1552,24 @@ def beam_search(
         # increase cur_len
         cur_len = cur_len + 1
 
+        if prev_sent_end:
+            prev_sent_end = False
+        else:
+            # SentBS: if previously sentence has ended, change new token to pad_token_id
+            input_ids = beam_scorer.is_sentences_complete(
+                input_ids, 
+                scores_before_decoding, 
+                beam_indices=beam_indices, 
+                pad_token_id=pad_token_id,
+                out_cur_len=out_cur_len,
+            )
+
         # beam search end condition
         if beam_scorer.is_done or stopping_criteria(input_ids, scores):
             if not synced_gpus:
                 break
             else:
                 this_peer_finished = True
-
 
     sequence_outputs = beam_scorer.finalize(
         input_ids,
@@ -1740,7 +1742,6 @@ def group_beam_search(
     ##################################
     out_cur_len = cur_len
     past_scores = model_kwargs.pop("past_scores", None)
-    tokenizer = model_kwargs.pop("tokenizer", None)
 
     if return_dict_in_generate and output_scores:
         beam_indices = [tuple(() for _ in range(num_sub_beams * batch_size)) for _ in range(num_beam_groups)]
@@ -1805,6 +1806,9 @@ def group_beam_search(
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
+
+        # store score before decoding step
+        scores_before_decoding = beam_scores.clone()
 
         if synced_gpus and this_peer_finished:
             cur_len = cur_len + 1
@@ -1909,17 +1913,6 @@ def group_beam_search(
                 )
 
         input_ids = torch.cat([input_ids, current_tokens.unsqueeze(-1)], dim=-1)
-
-        if prev_sent_end:
-            prev_sent_end = False
-        else:
-            # SentBS: if previously sentence has ended, change new token to pad_token_id
-            assert input_ids.dim() == 2 and tokenizer is not None # size [num_return_sequences, gen_len]
-            for batch_idx in range(input_ids.size(0)):
-                if (len(input_ids[batch_idx]) > 1) and (input_ids[batch_idx][-2] == pad_token_id) or is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
-                    input_ids[batch_idx][-1] = pad_token_id
-                if is_sentence_done(tokenizer.decode(input_ids[batch_idx][out_cur_len:-1])):
-                    input_ids[batch_idx][-1] = pad_token_id
         
         model_kwargs = model._update_model_kwargs_for_generation(
             outputs, model_kwargs, is_encoder_decoder=model.config.is_encoder_decoder
@@ -1929,6 +1922,18 @@ def group_beam_search(
 
         # increase cur_len
         cur_len = cur_len + 1
+        
+        if prev_sent_end:
+            prev_sent_end = False
+        else:
+            # SentBS: if previously sentence has ended, change new token to pad_token_id
+            input_ids = beam_scorer.is_sentences_complete(
+                input_ids, 
+                scores_before_decoding, 
+                beam_indices=beam_indices, 
+                pad_token_id=pad_token_id,
+                out_cur_len=out_cur_len,
+            )
 
         if beam_scorer.is_done or stopping_criteria(input_ids, scores):
             if not synced_gpus:
