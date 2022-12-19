@@ -12,9 +12,15 @@ import codecs
 import logging
 from sema.amr import AMR
 
-def final_score(predicted_scores: List[int], round: int)->float:
+def new_range(val, old_min_bound: int, old_max_bound: int):
+    new_min_bound = -1
+    new_max_bound = 1
+    return new_min_bound + ((val - old_min_bound) * (new_max_bound - new_min_bound)) / (old_max_bound - old_min_bound)
+
+def final_score(predicted_scores: List[int], round: int, min_bound: int=0, max_bound: int=1)->float:
     if len(predicted_scores) == 0:
         return 0.
+    predicted_scores = [new_range(x, min_bound, max_bound) for x in predicted_scores]
     return np.round(np.max(predicted_scores), round)
 
 class Metric:
@@ -267,7 +273,10 @@ class SmatchOfficial(Metric):
         Returns:
             initialized node mapping between two AMRs
         """
-        random.seed()
+        if self._random_seed is not None:
+            random.seed(self._random_seed)
+        else:
+            random.seed()
         matched_dict = {}
         result = []
         # list to store node indices that have no concept match
@@ -786,15 +795,16 @@ class SmatchOfficial(Metric):
 class WWLK(Metric):
     def __init__(self, input_format:str='penman', edge_to_node_transform:bool=False, 
                 iter:int=2, stability_level:int=0, random_init_relation:str='min_entropy',
-                w2v_uri:str='glove-wiki-gigaword-100'):
+                w2v_uri:str='glove-wiki-gigaword-100', random_seed: Optional[int]=None):
         self._grapa = gh.GraphParser(input_format=input_format, edge_to_node_transform=edge_to_node_transform)
         self._iter = iter
         self._stability_level = stability_level
         self._random_init_relation = random_init_relation
         self._w2v_uri = w2v_uri
+        self._random_seed = random_seed
 
     def _get_scores(self, graphs1, graphs2):
-        prepro = amrsim.AmrWasserPreProcessor(w2v_uri=self._w2v_uri, init=self._random_init_relation)
+        prepro = amrsim.AmrWasserPreProcessor(w2v_uri=self._w2v_uri, init=self._random_init_relation, random_seed=self._random_seed)
 
         predictor = amrsim.WasserWLK(preprocessor=prepro, iters=self._iter, stability=self._stability_level)
 
@@ -811,8 +821,8 @@ class WWLK(Metric):
         preds = []
         for graph1 in graphs1:
             graphs = [graph1] * len(graphs2)
-            preds.append(self._get_scores(graphs, graphs2))
-        return final_score(preds, round)
+            preds.extend(self._get_scores(graphs, graphs2))
+        return final_score(preds, round, min_bound=-1, max_bound=1)
 
 """
 This script calculates SEMA score between two AMRs
@@ -1085,4 +1095,4 @@ class Sema(Metric):
             precision, recall, f1 = sema.get_sema_value()
             f1_scores.append(f1)
 
-        return np.round(np.mean(f1_scores), round) if len(f1_scores) > 0. else 0.
+        return final_score(f1_scores, round)

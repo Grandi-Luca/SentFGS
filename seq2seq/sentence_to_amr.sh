@@ -18,7 +18,7 @@ then
       --penman-linearization \
       --use-pointer-tokens > ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt
 
-    echo `cat ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt` >> /home/grandi/project/amrs.amr.txt
+    # echo `cat ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt` >> /home/grandi/project/test_amrs.amr.txt
   done
 fi
 
