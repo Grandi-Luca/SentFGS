@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import Any, Optional
 from transformers.generation_logits_process import LogitsProcessor
@@ -51,9 +52,22 @@ class FaithfulProcess(LogitsProcessor):
 
             # convert sentence to amr
             for sentence in beam_sentences:
-                file_name = self._converter_to_amr(sentence)
+                sentence_amr_location = self._converter_to_amr(sentence)
+
+                # check if the path of input's amr graphs is a directory
+                if(os.path.isdir(self._amrs_input_path_name)):
+                    preds = []
+                    # iterate over files in specified directory
+                    for filename in os.listdir(self._amrs_input_path_name):
+                        f = os.path.join(self._amrs_input_path_name, filename)
+                        if os.path.isfile(f) and f != sentence_amr_location and ".amr" in f:
+                            preds.extend(self._metric.predict_score(sentence_amr_location, f))
+                    final_pred_score = max(preds)
+                
+                else:
+                    final_pred_score = max(self._metric.predict_score(sentence_amr_location, self._amrs_input_path_name))
 
                 # execute similarity matching and update final score
-                scores[idx] = scores[idx] + self._faithful_penalty * self._metric.predict_score(file_name, self._amrs_input_path_name)
+                scores[idx] = scores[idx] + self._faithful_penalty * final_pred_score
 
         return scores

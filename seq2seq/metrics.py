@@ -17,11 +17,11 @@ def new_range(val, old_min_bound: int, old_max_bound: int):
     new_max_bound = 1
     return new_min_bound + ((val - old_min_bound) * (new_max_bound - new_min_bound)) / (old_max_bound - old_min_bound)
 
-def final_score(predicted_scores: List[int], round: int, min_bound: int=0, max_bound: int=1)->float:
+def final_score(predicted_scores: List[int], round: int, min_bound: int=0, max_bound: int=1)->List[float]:
     if len(predicted_scores) == 0:
         return 0.
-    predicted_scores = [new_range(x, min_bound, max_bound) for x in predicted_scores]
-    return np.round(np.max(predicted_scores), round)
+    predicted_scores = [new_range(np.round(x,round), min_bound, max_bound) for x in predicted_scores]
+    return predicted_scores
 
 class Metric:
     def predict_score(self, f1:str, f2:str, round:int=4)->float:
@@ -40,11 +40,9 @@ class SmatchAMRUtils(Metric):
 
         preds = []
 
-        for amr in amrs1:
-            amrs = [amr] * len(amrs2)
-            for amr1, amr2 in zip(amrs, amrs2):
-                _, prec, rec, f1 = get_node_alignment(amr1, amr2)
-                preds.append(f1)
+        for amr1, amr2 in zip(amrs1, amrs2):
+            _, prec, rec, f1 = get_node_alignment(amr1, amr2)
+            preds.append(f1)
         
         return final_score(preds, round)
 
@@ -738,24 +736,21 @@ class SmatchOfficial(Metric):
         :return: generator of cur_amr1, cur_amr2 pairs: one-line AMR strings
         """
 
-        amrs1 = []
-        amrs2 = []
-
         while True:
             cur_amr1 = amr.AMR.get_amr_line(f1)
-            if not cur_amr1:
-                break
-            amrs1.append(cur_amr1)
-        
-        while True:
             cur_amr2 = amr.AMR.get_amr_line(f2)
-            if not cur_amr2:
-                break
-            amrs2.append(cur_amr2)
-        
-        for amr1 in amrs1:
-            for amr2 in amrs2:
-                yield amr1, amr2
+            if not cur_amr1 and not cur_amr2:
+                pass
+            elif not cur_amr1:
+                print("Error: File 1 has less AMRs than file 2", file=self._ERROR_LOG)
+                print("Ignoring remaining AMRs", file=self._ERROR_LOG)
+            elif not cur_amr2:
+                print("Error: File 2 has less AMRs than file 1", file=self._ERROR_LOG)
+                print("Ignoring remaining AMRs", file=self._ERROR_LOG)
+            else:
+                yield cur_amr1, cur_amr2
+                continue
+            break
 
 
     def _score_amr_pairs(self, f1, f2, justinstance=False, justattribute=False, justrelation=False):
@@ -811,18 +806,13 @@ class WWLK(Metric):
         preds = predictor.predict(graphs1, graphs2)
         return preds
 
-    def predict_score(self, f1:str, f2:str, round:int=4)->float:
+    def predict_score(self, f1:str, f2:str, round:int=4):
         string_graphs1 = dh.read_graph_file(f1)
         graphs1, nodemap1 = self._grapa.parse(string_graphs1)
 
         string_graphs2 = dh.read_graph_file(f2)
         graphs2, nodemap2 = self._grapa.parse(string_graphs2)
-
-        preds = []
-        for graph1 in graphs1:
-            graphs = [graph1] * len(graphs2)
-            preds.extend(self._get_scores(graphs, graphs2))
-        return final_score(preds, round, min_bound=-1, max_bound=1)
+        return final_score(self._get_scores(graphs1, graphs2), rounding=round, min_bound=-1, max_bound=1)
 
 """
 This script calculates SEMA score between two AMRs
@@ -1050,48 +1040,50 @@ class Sema(Metric):
         logger = logging.getLogger(__name__)
         test = codecs.open('amrs_graph/8_summary_0.amr.txt', 'r', 'utf-8')
         gold = codecs.open('amrs_graph/8_summary_0.amr.txt', 'r', 'utf-8')
+        sema = Sema()
+        flag = False
 
         f1_scores = []
-        amrs1 = []
-        amrs2 = []
 
         # read amr files
         while True:
             cur_amr1 = AMR.get_amr_line(test)
-            if not cur_amr1:
-                break
-            amrs1.append(cur_amr1)
-
-        while True:
             cur_amr2 = AMR.get_amr_line(gold)
-            if not cur_amr2:
-                break
-            amrs2.append(cur_amr2)
 
-        for cur_amr1 in amrs1:
-            sema = Sema()
-            for cur_amr2 in amrs2:
-                try:
-                    amr1 = AMR.parse_AMR_line(cur_amr1)
-                except Exception as e:
-                    logger.error('Error in parsing amr 1: %s' % cur_amr1)
-                    logger.error("Please check if the AMR is ill-formatted. Ignoring remaining AMRs")
-                    logger.error("Error message: %s" % str(e))
-                    flag = True
-                    break
-                try:
-                    amr2 = AMR.parse_AMR_line(cur_amr2)
-                except Exception as e:
-                    logger.error("Error in parsing amr 2: %s" % cur_amr2)
-                    logger.error("Please check if the AMR is ill-formatted. Ignoring remaining AMRs")
-                    logger.error("Error message: %s" % str(e))
-                    flag = True
-                    break
-                prefix_test = 'a'
-                prefix_gold = 'b'
-                amr1.rename_node(prefix_test)
-                amr2.rename_node(prefix_gold)
-                sema.compute_sema(amr1, amr2)
+            if cur_amr1 == '' and cur_amr2 == '':
+                break
+            if cur_amr1 == '':
+                logger.error('Error: File 1 has less AMRs than file 2')
+                logger.error('Ignoring remaining AMRs')
+                flag = True
+                break
+            if cur_amr2 == '':
+                logger.error('Error: File 2 has less AMRs than file 1')
+                logger.error('Ignoring remaining AMRs')
+                flag = True
+                break
+            try:
+                amr1 = AMR.parse_AMR_line(cur_amr1)
+            except Exception as e:
+                logger.error('Error in parsing amr 1: %s' % cur_amr1)
+                logger.error("Please check if the AMR is ill-formatted. Ignoring remaining AMRs")
+                logger.error("Error message: %s" % str(e))
+                flag = True
+                break
+            try:
+                amr2 = AMR.parse_AMR_line(cur_amr2)
+            except Exception as e:
+                logger.error("Error in parsing amr 2: %s" % cur_amr2)
+                logger.error("Please check if the AMR is ill-formatted. Ignoring remaining AMRs")
+                logger.error("Error message: %s" % str(e))
+                flag = True
+                break
+            prefix_test = 'a'
+            prefix_gold = 'b'
+            amr1.rename_node(prefix_test)
+            amr2.rename_node(prefix_gold)
+            sema.compute_sema(amr1, amr2)
+        if not flag:
             precision, recall, f1 = sema.get_sema_value()
             f1_scores.append(f1)
 
