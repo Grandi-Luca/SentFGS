@@ -27,10 +27,11 @@ RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
     && conda init bash \
     && . /root/.bashrc \
     && conda update conda -y \
-    && conda install pip python -y \
-    && conda create -n spring-env python=3.8.12 pip -y \
-    && /root/miniconda3/bin/pip install ctc_score summac \
-    && /root/miniconda3/bin/pip install wandb penman spacy pandas torch transformers==4.24.0 \
+    && conda install python=3.8.12 -y \
+    && /root/miniconda3/bin/pip install summac ctc_score \
+    && /root/miniconda3/bin/pip install wandb numpy scipy pandas \
+    && /root/miniconda3/bin/pip install penman spacy torch transformers==4.24.0  \
     && python -m spacy download en_core_web_sm \
-    && /root/miniconda3/bin/pip install smatch numpy scipy networkx gensim pyemd /amr-utils \
+    && /root/miniconda3/bin/pip install networkx gensim pyemd /amr-utils smatch \
+    && conda create -n spring-env python=3.8.12 pip -y \
     && /root/miniconda3/envs/spring-env/bin/pip install -r /spring/requirements.txt
