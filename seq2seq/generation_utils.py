@@ -1236,7 +1236,7 @@ def _apply_faithful_penalty_and_get_best_hyp(
     eos_token_id: int,
     max_length: int, 
     faithful_process: Optional[FaithfulProcess]=None
-) -> Tuple[torch.LongTensor, torch.FLoatTensor]:
+) -> Tuple[torch.LongTensor, torch.FloatTensor]:
     # apply faithful penalty
     if faithful_process is not None:
         beam_scores = faithful_process(input_ids[:, old_seq_len:], beam_scores)
