@@ -64,6 +64,7 @@ from seq2seq.faithful_process import FaithfulProcess
 from seq2seq.metrics import Metric
 from seq2seq.stopping_criteria import MultiBatchEndSentenceCriteria
 
+import os
 
 logger = logging.get_logger(__name__)
 
@@ -1095,6 +1096,7 @@ def generate(
 
         stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
 
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
         while input_ids.shape[-1] < max_length:
 
             # 11. prepare beam search scorer
@@ -1168,6 +1170,8 @@ def generate(
         )
 
         stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
+
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
         while input_ids.shape[-1] < max_length:
 
@@ -1261,7 +1265,7 @@ def _apply_faithful_penalty_and_get_best_hyp(
         curr_gen_ids = best_hyp[:last_valid_idx+1]
 
         # replace all beam with the best hyp
-        input_ids = curr_gen_ids.repeat(num_beams, 1)
+        input_ids[:1] = curr_gen_ids.repeat(num_beams-1, 1)
     
     return input_ids, beam_scores
 

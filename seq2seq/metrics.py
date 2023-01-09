@@ -19,7 +19,7 @@ def new_range(val, old_min_bound: int, old_max_bound: int):
 
 def final_score(predicted_scores: List[int], round: int, min_bound: int=0, max_bound: int=1)->List[float]:
     if len(predicted_scores) == 0:
-        return 0.
+        return [0.]
     predicted_scores = [new_range(np.round(x,round), min_bound, max_bound) for x in predicted_scores]
     return predicted_scores
 

@@ -18,14 +18,16 @@ then
       --checkpoint ${PATH_MODEL} \
       --texts $file \
       --penman-linearization \
-      --use-pointer-tokens > ${PATH_AMR_SENTS}${output_file}.amr.txt
+      --use-pointer-tokens \
+      --output-file-name ${PATH_AMR_SENTS}${output_file}.amr.txt
   
   else
     python3 -u ${FOLDER_SPRING}/predict_amrs_from_plaintext.py \
       --checkpoint ${PATH_MODEL} \
       --texts $file \
       --penman-linearization \
-      --use-pointer-tokens > ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt
+      --use-pointer-tokens \
+      --output-file-name ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt
 
   fi
 fi
