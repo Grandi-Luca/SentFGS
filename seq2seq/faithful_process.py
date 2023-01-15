@@ -45,10 +45,13 @@ class FaithfulProcess(LogitsProcessor):
 
         self._nlp = spacy.load('en_core_web_sm')
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, seq_starts: torch.LongTensor, seq_ends: torch.LongTensor) -> torch.FloatTensor:
         # decode the sequence and split into sentences
         for idx, hyp in enumerate(input_ids):
-            beam_sentences = to_sentences(self._tokenizer.decode(hyp, skip_special_tokens=True), self._nlp)
+            if seq_ends[idx] != -1:
+                beam_sentences = to_sentences(self._tokenizer.decode(hyp, skip_special_tokens=True)[seq_starts[idx]:seq_ends[idx]], self._nlp)
+            else:
+                beam_sentences = to_sentences(self._tokenizer.decode(hyp, skip_special_tokens=True)[seq_starts[idx]:], self._nlp)
 
             # convert sentence to amr
             for sentence in beam_sentences:

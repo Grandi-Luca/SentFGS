@@ -63,6 +63,7 @@ from transformers.utils import ModelOutput, logging
 from seq2seq.faithful_process import FaithfulProcess
 from seq2seq.metrics import Metric
 from seq2seq.stopping_criteria import MultiBatchEndSentenceCriteria
+from seq2seq.sentence_utils import ConverterSentenceToAMR
 
 import os
 
@@ -896,6 +897,7 @@ def generate(
     amrs_input_path:Optional[str] = model_kwargs.pop("amrs_input_path", None)
     metric:Optional[Metric] = model_kwargs.pop("metric", None)
     faithful_penalty:Optional[float] = model_kwargs.pop("faithful_penalty", None)
+    sentence_converter :ConverterSentenceToAMR = model_kwargs.pop("sentence_converter", None)
 
     # 2. Define model inputs
     # inputs_tensor has to be defined
@@ -1075,6 +1077,7 @@ def generate(
         amrs_input_path_name=amrs_input_path, 
         metric=metric,
         faithful_penalty=faithful_penalty,
+        converter_to_amr=sentence_converter,
     ) if (tokenizer is not None) and (amrs_input_path is not None) and (faithful_penalty is not None and faithful_penalty > 0) else None
 
     # 8. prepare stopping criteria
@@ -1094,7 +1097,8 @@ def generate(
             input_ids, expand_size=num_beams, is_encoder_decoder=model.config.is_encoder_decoder, **model_kwargs
         )
 
-        stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
+        seq_starts = input_ids.new([0] * input_ids.shape[0])
+        prev_seq_scores = None
 
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         while input_ids.shape[-1] < max_length:
@@ -1111,7 +1115,7 @@ def generate(
             )
 
             # 12. run beam search
-            gen_mode_output = beam_search(
+            gen_mode_output, seq_starts, seq_ends = beam_search(
                 model,
                 input_ids,
                 beam_scorer,
@@ -1122,22 +1126,40 @@ def generate(
                 output_scores=True,
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
+                seq_starts=seq_starts,
+                prev_seq_scores=prev_seq_scores,
                 **model_kwargs,
             )
             # process new sentence
-            old_sequence_len = input_ids.shape[-1]
             input_ids = gen_mode_output['sequences']
             prev_seq_scores = gen_mode_output['sequences_scores']
 
-            input_ids, prev_seq_scores = _apply_faithful_penalty_and_get_best_hyp(
+            input_ids, prev_seq_scores = post_process_hyps(
                 input_ids,
                 prev_seq_scores, 
                 faithful_process=faithful_process, 
                 num_beams=num_beams, 
-                old_seq_len=old_sequence_len, 
+                num_beam_groups=num_beam_groups,
+                seq_starts=seq_starts,
+                seq_ends=seq_ends,
                 pad_token_id=pad_token_id, 
                 eos_token_id=eos_token_id, 
-                max_length=max_length)
+                max_length=max_length,
+                length_penalty=length_penalty,
+            )
+
+            seq_starts = seq_ends
+
+            if all(seq_ends.eq(-1)):
+                predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
+                sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
+
+                # reorder hyps
+                for idx, (score, hyp) in enumerate(sorted_predicted_sentences):
+                    input_ids[idx] = hyp
+                    prev_seq_scores[idx] = score
+                print(prev_seq_scores)
+                break
 
         if return_dict_in_generate:
             if not output_scores:
@@ -1169,10 +1191,10 @@ def generate(
             input_ids, expand_size=num_beams, is_encoder_decoder=model.config.is_encoder_decoder, **model_kwargs
         )
 
-        stopping_criteria.append(MultiBatchEndSentenceCriteria(pad_token_id))
+        seq_starts = input_ids.new([0] * input_ids.shape[0])
+        prev_seq_scores = None
 
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
         while input_ids.shape[-1] < max_length:
 
             # 11. prepare beam search scorer
@@ -1183,12 +1205,11 @@ def generate(
                 length_penalty=length_penalty,
                 do_early_stopping=early_stopping,
                 num_beam_hyps_to_keep=num_beams,
-                num_beam_groups=num_beam_groups,
                 tokenizer=tokenizer,
             )
 
             # 12. run beam search
-            gen_mode_output = group_beam_search(
+            gen_mode_output, seq_starts, seq_ends = group_beam_search(
                 model,
                 input_ids,
                 beam_scorer,
@@ -1199,22 +1220,40 @@ def generate(
                 output_scores=True,
                 return_dict_in_generate=True,
                 synced_gpus=synced_gpus,
+                seq_starts=seq_starts,
+                prev_seq_scores=prev_seq_scores,
                 **model_kwargs,
             )
-            
-            old_sequence_len = input_ids.shape[-1]
+            # process new sentence
             input_ids = gen_mode_output['sequences']
-            prev_seq_scores = gen_mode_output['sequences_scores']
+            prev_seq_scores = gen_mode_output['sequences_scores']  
+            
+            input_ids, prev_seq_scores = post_process_hyps(
+                input_ids,
+                prev_seq_scores, 
+                faithful_process=faithful_process, 
+                num_beams=num_beams, 
+                num_beam_groups=num_beam_groups,
+                seq_starts=seq_starts,
+                seq_ends=seq_ends,
+                pad_token_id=pad_token_id, 
+                eos_token_id=eos_token_id, 
+                max_length=max_length,
+                length_penalty=length_penalty,
+            )
+            
+            seq_starts = seq_ends
+            
+            if all(seq_ends.eq(-1)):
+                predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
+                sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
 
-        input_ids, prev_seq_scores = _apply_faithful_penalty_and_get_best_hyp(
-            input_ids,
-            prev_seq_scores, 
-            faithful_process=faithful_process, 
-            num_beams=num_beams, 
-            old_seq_len=old_sequence_len, 
-            pad_token_id=pad_token_id, 
-            eos_token_id=eos_token_id, 
-            max_length=max_length)
+                # reorder hyps
+                for idx, (score, hyp) in enumerate(sorted_predicted_sentences):
+                    input_ids[idx] = hyp
+                    prev_seq_scores[idx] = score
+
+                break
 
         if return_dict_in_generate:
             if not output_scores:
@@ -1231,32 +1270,44 @@ def generate(
     else:
         raise NotImplementedError
 
-def _apply_faithful_penalty_and_get_best_hyp(
+def post_process_hyps(
     input_ids: torch.LongTensor, 
     beam_scores: torch.FloatTensor, 
     num_beams: int,
-    old_seq_len: int, 
+    num_beam_groups: int,
+    seq_starts: torch.LongTensor,
+    seq_ends: torch.LongTensor,
     pad_token_id: int,
     eos_token_id: int,
     max_length: int, 
-    faithful_process: Optional[FaithfulProcess]=None
+    length_penalty: float,
+    faithful_process: Optional[FaithfulProcess]=None,
+    keep_only_best: Optional[bool]=None
 ) -> Tuple[torch.LongTensor, torch.FloatTensor]:
+
+    input_ids = input_ids[:, :-1] if input_ids.shape[-1] < max_length - 1 else input_ids
+
+    if input_ids.shape[-1] < max_length - 1:
+        # restore score before length penalty
+        for idx, hyp in enumerate(input_ids):
+            beam_scores[idx] = beam_scores[idx] * (hyp.shape[-1]**length_penalty)
+
     # apply faithful penalty
     if faithful_process is not None:
-        beam_scores = faithful_process(input_ids[:, old_seq_len:], beam_scores)
+        beam_scores = faithful_process(input_ids, beam_scores, seq_starts=seq_starts, seq_ends=seq_ends)
 
-    predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), beam_scores.clone())]
-    sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
-    best_hyp_tuple = sorted_predicted_sentences[0]
-    best_hyp = best_hyp_tuple[1]
-    best_hyp_score = best_hyp_tuple[0]
+    if keep_only_best:
+        predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), beam_scores.clone())]
+        sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
+        best_hyp_tuple = sorted_predicted_sentences[0]
+        best_hyp = best_hyp_tuple[1]
+        best_hyp_score = best_hyp_tuple[0]
 
-    # reorder hyps
-    for idx, (score, hyp) in enumerate(sorted_predicted_sentences):
-        input_ids[idx] = hyp
-        beam_scores[idx] = score 
+        # reorder hyps
+        for idx, (score, hyp) in enumerate(sorted_predicted_sentences):
+            input_ids[idx] = hyp
+            beam_scores[idx] = score 
 
-    if input_ids[:-1].shape[-1] < max_length - 1:
         # cut off pad and eos ids
         pad_mask = best_hyp==pad_token_id
         eos_mask = best_hyp==eos_token_id
@@ -1265,7 +1316,9 @@ def _apply_faithful_penalty_and_get_best_hyp(
         curr_gen_ids = best_hyp[:last_valid_idx+1]
 
         # replace all beam with the best hyp
-        input_ids[:1] = curr_gen_ids.repeat(num_beams-1, 1)
+        input_ids = curr_gen_ids.repeat(num_beams, 1)
+        beam_scores = beam_scores.new_full(beam_scores.shape, -1e9)
+        beam_scores[::num_beams//num_beam_groups] = best_hyp_score
     
     return input_ids, beam_scores
 
@@ -1386,7 +1439,8 @@ def beam_search(
 
     batch_beam_size, cur_len = input_ids.shape
     ############################################
-    out_cur_len = cur_len
+    seq_starts = model_kwargs.pop("seq_starts", input_ids.new([0] * batch_beam_size))
+    prev_seq_scores = model_kwargs.pop("prev_seq_scores", None)
 
     if num_beams * batch_size != batch_beam_size:
         raise ValueError(
@@ -1411,13 +1465,13 @@ def beam_search(
 
     # initialise score of first beam with 0 and the rest with -1e9. This makes sure that only tokens
     # of the first beam are considered to avoid sampling the exact same tokens across all beams.
-    beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
-    beam_scores[:, 1:] = -1e9
-    beam_scores = beam_scores.view((batch_size * num_beams,))
-
-    # SentBS: flag to detect if a new sentence is produced
-    prev_sent_end = True # avoid take previous sentence as new generated sentence
-    
+    if prev_seq_scores is None:
+        beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
+        beam_scores[:, 1:] = -1e9
+        beam_scores = beam_scores.view((batch_size * num_beams,))
+    else:
+        beam_scores = prev_seq_scores
+  
     this_peer_finished = False  # used by synced_gpus only
     while True:
         if synced_gpus:
@@ -1442,9 +1496,6 @@ def beam_search(
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-
-        # store score before decoding step
-        scores_before_decoding = beam_scores.clone()
 
         if synced_gpus and this_peer_finished:
             cur_len = cur_len + 1
@@ -1515,7 +1566,6 @@ def beam_search(
             pad_token_id=pad_token_id,
             eos_token_id=eos_token_id,
             beam_indices=beam_indices,
-            out_cur_len=out_cur_len,
         )
 
         beam_scores = beam_outputs["next_beam_scores"]
@@ -1537,20 +1587,15 @@ def beam_search(
         # increase cur_len
         cur_len = cur_len + 1
 
-        if prev_sent_end:
-            prev_sent_end = False
-        else:
-            # SentBS: if previously sentence has ended, change new token to pad_token_id
-            input_ids = beam_scorer.is_sentences_complete(
-                input_ids, 
-                scores_before_decoding, 
-                beam_indices=beam_indices, 
-                pad_token_id=pad_token_id,
-                out_cur_len=out_cur_len,
-            )
+        seq_starts = seq_starts[beam_idx]
+
+        is_sentences_end, seq_ends = beam_scorer.is_sentences_complete(
+            input_ids, 
+            seq_starts=seq_starts,
+        )
 
         # beam search end condition
-        if beam_scorer.is_done or stopping_criteria(input_ids, scores):
+        if beam_scorer.is_done or stopping_criteria(input_ids, scores) or is_sentences_end:
             if not synced_gpus:
                 break
             else:
@@ -1582,7 +1627,7 @@ def beam_search(
                 decoder_attentions=decoder_attentions,
                 cross_attentions=cross_attentions,
                 decoder_hidden_states=decoder_hidden_states,
-            )
+            ), seq_starts, seq_ends
         else:
             return BeamSearchDecoderOnlyOutput(
                 sequences=sequence_outputs["sequences"],
@@ -1591,9 +1636,9 @@ def beam_search(
                 beam_indices=sequence_outputs["beam_indices"],
                 attentions=decoder_attentions,
                 hidden_states=decoder_hidden_states,
-            )
+            ), seq_starts, seq_ends
     else:
-        return sequence_outputs["sequences"]
+        return sequence_outputs["sequences"], seq_starts, seq_ends
 
 def group_beam_search(
     model,
@@ -1725,7 +1770,8 @@ def group_beam_search(
 
     batch_beam_size, cur_len = input_ids.shape
     ##################################
-    out_cur_len = cur_len
+    seq_starts = model_kwargs.pop("seq_starts", input_ids.new([0] * batch_beam_size))
+    prev_seq_scores = model_kwargs.pop("prev_seq_scores", None)
 
     if return_dict_in_generate and output_scores:
         beam_indices = [tuple(() for _ in range(num_sub_beams * batch_size)) for _ in range(num_beam_groups)]
@@ -1752,9 +1798,12 @@ def group_beam_search(
 
     # initialise score of first beam of each group with 0 and the rest with -1e9. This ensures that the beams in
     # the same group don't produce same tokens everytime.
-    beam_scores = torch.full((batch_size, num_beams), -1e9, dtype=torch.float, device=device)
-    beam_scores[:, ::num_sub_beams] = 0
-    beam_scores = beam_scores.view((batch_size * num_beams,))
+    if prev_seq_scores is not None:
+        beam_scores = torch.full((batch_size, num_beams), -1e9, dtype=torch.float, device=device)
+        beam_scores[:, ::num_sub_beams] = 0
+        beam_scores = beam_scores.view((batch_size * num_beams,))
+    else:
+        beam_scores = prev_seq_scores
 
     # SentBS: flag to detect if a new sentence is produced
     prev_sent_end = True # avoid take previous sentence as new generated sentence
@@ -1851,7 +1900,6 @@ def group_beam_search(
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
                 beam_indices=process_beam_indices,
-                out_cur_len=out_cur_len,
             )
 
             beam_scores[batch_group_indices] = beam_outputs["next_beam_scores"]
@@ -1902,19 +1950,14 @@ def group_beam_search(
         # increase cur_len
         cur_len = cur_len + 1
         
-        if prev_sent_end:
-            prev_sent_end = False
-        else:
-            # SentBS: if previously sentence has ended, change new token to pad_token_id
-            input_ids = beam_scorer.is_sentences_complete(
-                input_ids, 
-                scores_before_decoding, 
-                beam_indices=beam_indices, 
-                pad_token_id=pad_token_id,
-                out_cur_len=out_cur_len,
-            )
+        seq_starts = seq_starts[beam_idx]
 
-        if beam_scorer.is_done or stopping_criteria(input_ids, scores):
+        is_sentences_end, seq_ends = beam_scorer.is_sentences_complete(
+            input_ids, 
+            seq_starts=seq_starts,
+        )
+
+        if beam_scorer.is_done or stopping_criteria(input_ids, scores) or is_sentences_end:
             if not synced_gpus:
                 break
             else:
@@ -1930,7 +1973,6 @@ def group_beam_search(
         eos_token_id=eos_token_id,
         max_length=stopping_criteria.max_length,
         beam_indices=final_beam_indices,
-        out_cur_len=out_cur_len,
     )
 
     if return_dict_in_generate:
@@ -1948,7 +1990,7 @@ def group_beam_search(
                 decoder_attentions=decoder_attentions,
                 cross_attentions=cross_attentions,
                 decoder_hidden_states=decoder_hidden_states,
-            )
+            ), seq_starts, seq_ends
         else:
             return BeamSearchDecoderOnlyOutput(
                 sequences=sequence_outputs["sequences"],
@@ -1957,6 +1999,6 @@ def group_beam_search(
                 beam_indices=sequence_outputs["beam_indices"],
                 attentions=decoder_attentions,
                 hidden_states=decoder_hidden_states,
-            )
+            ), seq_starts, seq_ends
     else:
-        return sequence_outputs["sequences"]
+        return sequence_outputs["sequences"], seq_starts, seq_ends
