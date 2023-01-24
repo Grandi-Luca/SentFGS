@@ -24,7 +24,7 @@ import torch
 from transformers.generation_beam_constraints import Constraint, ConstraintListState
 from transformers.utils import add_start_docstrings
 
-from seq2seq.sentence_utils import is_sentence_done
+from generation.sentence_utils import is_sentence_done
 
 PROCESS_INPUTS_DOCSTRING = r"""
     Args:

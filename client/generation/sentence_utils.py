@@ -1,6 +1,7 @@
+import re
 from typing import List, Tuple
 import subprocess
-import re
+import urllib.request
 
 class ConverterSentenceToAMR():
     def __call__(self, sentences:str)->List[str]:
@@ -8,13 +9,18 @@ class ConverterSentenceToAMR():
 
 class SpringConverter(ConverterSentenceToAMR):
     def __call__(self, sentences:str)->List[str]:
-        with open('documents/predict.txt', 'w') as file:
+        with open('../documents/predict.txt', 'w') as file:
             file.write(sentences)
 
         # convert sentences to amr
-        amr_graphs_path = subprocess.check_output('conda run -n spring-env /home/grandi/project/seq2seq/sentence_to_amr.sh documents/predict.txt', shell=True).decode("utf-8").replace('\n', '')
+        input_path = urllib.parse.quote_plus('../documents/predict.txt')
+        fp = urllib.request.urlopen(f"http://localhost:1234/predict_amrs_from_plaintext?input_path={input_path}&only_ok=1")
+        encodedContent = fp.read()
+        amr_file_path = encodedContent.decode("utf8")
+        fp.close()
+        # amr_file_path = subprocess.check_output('conda run -n spring-env /home/grandi/project/seq2seq/sentence_to_amr.sh documents/predict.txt', shell=True).decode("utf-8").replace('\n', '')
 
-        return amr_graphs_path + "predict.amr.txt"
+        return amr_file_path
 
 def is_sentence_done(text: str) -> Tuple[bool, int]:
     exception_indicators = ["(\s\"?s|\s?\"?S)ec\.", "(\su|\s?U)\.\s?(s|S)\.", "\se\.?\s?g\.", "\s?E\.?\s?g\.", "\set al\.\)?", \

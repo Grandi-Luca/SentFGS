@@ -2,10 +2,11 @@ import os
 import torch
 from typing import Any, Optional
 from transformers.generation_logits_process import LogitsProcessor
-from seq2seq.metrics import Metric, WWLK
-from seq2seq.sentence_utils import ConverterSentenceToAMR, SpringConverter
+from generation.metrics import Metric, WWLK
+from generation.sentence_utils import ConverterSentenceToAMR, SpringConverter
 
 import spacy
+import filecmp
 
 
 def to_sentences(doc:str, nlp = None):
@@ -63,7 +64,7 @@ class FaithfulProcess(LogitsProcessor):
                     # iterate over files in specified directory
                     for filename in os.listdir(self._amrs_input_path_name):
                         f = os.path.join(self._amrs_input_path_name, filename)
-                        if os.path.isfile(f) and f != sentence_amr_location and ".amr" in f:
+                        if os.path.isfile(f) and os.path.realpath(f) != sentence_amr_location and ".amr" in f:
                             preds.extend(self._metric.predict_score(sentence_amr_location, f))
                     final_pred_score = max(preds)
                 

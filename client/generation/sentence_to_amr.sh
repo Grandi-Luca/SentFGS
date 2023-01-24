@@ -1,6 +1,6 @@
 #!/bin/bash
 
-FOLDER_SPRING=/home/grandi/project/spring #
+FOLDER_SPRING=/home/grandi/project/server/spring #
 PATH_AMR_SENTS=amrs_graph/ #
 PATH_MODEL=${FOLDER_SPRING}/AMR3.parsing.pt
 
@@ -20,6 +20,8 @@ then
       --penman-linearization \
       --use-pointer-tokens \
       --output-file-name ${PATH_AMR_SENTS}${output_file}.amr.txt
+    
+    echo ${PATH_AMR_SENTS}${output_file}.amr.txt >&1
   
   else
     python3 -u ${FOLDER_SPRING}/predict_amrs_from_plaintext.py \
@@ -29,7 +31,8 @@ then
       --use-pointer-tokens \
       --output-file-name ${PATH_AMR_SENTS}$(basename -- $file .txt).amr.txt
 
+    echo ${PATH_AMR_SENTS}${output_file}.amr.txt >&1
+
   fi
 fi
 
-echo ${PATH_AMR_SENTS} >&1

@@ -25,7 +25,7 @@ import torch.distributed as dist
 from torch import nn
 
 from transformers.generation_beam_constraints import Constraint, DisjunctiveConstraint, PhrasalConstraint
-from seq2seq.generation_beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
+from generation.generation_beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
 from transformers.generation_logits_process import (
     EncoderNoRepeatNGramLogitsProcessor,
     ExponentialDecayLengthPenalty,
@@ -60,10 +60,9 @@ from transformers.generation_stopping_criteria import (
 from transformers.pytorch_utils import torch_int_div
 from transformers.utils import ModelOutput, logging
 
-from seq2seq.faithful_process import FaithfulProcess
-from seq2seq.metrics import Metric
-from seq2seq.stopping_criteria import MultiBatchEndSentenceCriteria
-from seq2seq.sentence_utils import ConverterSentenceToAMR
+from generation.faithful_process import FaithfulProcess
+from generation.metrics import Metric
+from generation.sentence_utils import ConverterSentenceToAMR
 
 import os
 
@@ -151,6 +150,7 @@ class BeamSearchEncoderDecoderOutput(ModelOutput):
     decoder_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     cross_attentions: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     decoder_hidden_states: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+
 
 BeamSearchOutput = Union[BeamSearchEncoderDecoderOutput, BeamSearchDecoderOnlyOutput]
 
@@ -1151,14 +1151,14 @@ def generate(
             seq_starts = seq_ends
 
             if all(seq_ends.eq(-1)):
-                predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
+                predicted_sentences = [(score.item()/(sequence_ids.shape[-1]-1)**length_penalty, sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
                 sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
 
                 # reorder hyps
                 for idx, (score, hyp) in enumerate(sorted_predicted_sentences):
                     input_ids[idx] = hyp
                     prev_seq_scores[idx] = score
-                print(prev_seq_scores)
+
                 break
 
         if return_dict_in_generate:
@@ -1245,7 +1245,7 @@ def generate(
             seq_starts = seq_ends
             
             if all(seq_ends.eq(-1)):
-                predicted_sentences = [(score.item(), sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
+                predicted_sentences = [(score.item()/(sequence_ids.shape[-1]-1)**length_penalty, sequence_ids) for sequence_ids, score in zip(input_ids.clone(), prev_seq_scores.clone())]
                 sorted_predicted_sentences = sorted(predicted_sentences, key=lambda x: x[0], reverse=True)
 
                 # reorder hyps
@@ -1285,13 +1285,10 @@ def post_process_hyps(
     keep_only_best: Optional[bool]=None
 ) -> Tuple[torch.LongTensor, torch.FloatTensor]:
 
-    input_ids = input_ids[:, :-1] if input_ids.shape[-1] < max_length - 1 else input_ids
-
-    if input_ids.shape[-1] < max_length - 1:
-        # restore score before length penalty
-        for idx, hyp in enumerate(input_ids):
-            beam_scores[idx] = beam_scores[idx] * (hyp.shape[-1]**length_penalty)
-
+    for idx, hyp in enumerate(input_ids):
+        cur_len = hyp.shape[-1] - 1
+        beam_scores[idx] = beam_scores[idx] * (cur_len**length_penalty)
+    
     # apply faithful penalty
     if faithful_process is not None:
         beam_scores = faithful_process(input_ids, beam_scores, seq_starts=seq_starts, seq_ends=seq_ends)
@@ -1319,6 +1316,8 @@ def post_process_hyps(
         input_ids = curr_gen_ids.repeat(num_beams, 1)
         beam_scores = beam_scores.new_full(beam_scores.shape, -1e9)
         beam_scores[::num_beams//num_beam_groups] = best_hyp_score
+    else:
+        input_ids = input_ids if all(seq_ends.eq(-1)) else input_ids[:, :-1]
     
     return input_ids, beam_scores
 
