@@ -1,8 +1,8 @@
 #!/bin/bash
 
 FOLDER_SPRING=/home/grandi/project/server/spring #
-PATH_AMR_SENTS=amrs_graph/ #
-PATH_MODEL=${FOLDER_SPRING}/AMR3.parsing.pt
+PATH_AMR_SENTS=/home/grandi/project/graphs/ #
+PATH_MODEL=${FOLDER_SPRING}/checkpoints/AMR3.parsing.pt
 
 if ! [ $# -eq 0 ]
 then

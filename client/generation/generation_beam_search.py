@@ -308,26 +308,24 @@ class BeamSearchScorer(BeamScorer):
     def is_sentences_complete(
         self, 
         input_ids: torch.LongTensor, 
-        seq_starts: List[int],
-    ) -> Tuple[bool, torch.LongTensor]:
-        done = [False] * len(self._beam_hyps * self.num_beams)
-        seq_ends = seq_starts.new_full(seq_starts.shape, -1)
-
+        beam_scores: torch.FloatTensor,
+        pad_token_id: int, 
+        start_sent: int,
+        beam_indices: Optional[torch.LongTensor] = None,
+    )->torch.LongTensor:
         if self._tokenizer is not None:
-            for batch_idx, beam_hyp in enumerate(self._beam_hyps):
+            for batch_idx, _ in enumerate(self._beam_hyps):
                 if self._done[batch_idx]:
-                    for i in range(batch_idx*beam_hyp.num_beams, batch_idx*beam_hyp.num_beams+beam_hyp.num_beams):
-                        done[i] = True
                     continue
-  
-                for beam_id in range(beam_hyp.num_beams):
-                    batch_beam_idx = batch_idx * beam_hyp.num_beams + beam_id
+                for beam_id in range(self.num_beams):
+                    batch_beam_idx = batch_idx * self.num_beams + beam_id
 
-                    sent_info = is_sentence_done(self._tokenizer.decode(input_ids[batch_beam_idx], skip_special_tokens=True)[seq_starts[batch_beam_idx]:])
-                    done[batch_beam_idx] = sent_info[0]
-                    seq_ends[batch_beam_idx] = seq_starts[batch_beam_idx] + sent_info[1]
+                    if (len(input_ids[batch_beam_idx]) > 1) and (input_ids[batch_beam_idx][-2] == pad_token_id):
+                        input_ids[batch_beam_idx][-1] = pad_token_id
+                    if is_sentence_done(self._tokenizer.decode(input_ids[batch_beam_idx, start_sent:-1])):
+                        input_ids[batch_beam_idx][-1] = pad_token_id
 
-        return all(done), seq_ends
+        return input_ids
     
     def finalize(
         self,

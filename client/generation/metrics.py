@@ -17,10 +17,10 @@ def new_range(val, old_min_bound: int, old_max_bound: int):
     new_max_bound = 1
     return new_min_bound + ((val - old_min_bound) * (new_max_bound - new_min_bound)) / (old_max_bound - old_min_bound)
 
-def final_score(predicted_scores: List[int], round: int, min_bound: int=0, max_bound: int=1)->List[float]:
+def final_score(predicted_scores: List[int], rounding: int, min_bound: int=0, max_bound: int=1)->List[float]:
     if len(predicted_scores) == 0:
         return [0.]
-    predicted_scores = [new_range(np.round(x,round), min_bound, max_bound) for x in predicted_scores]
+    predicted_scores = [new_range(np.round(x, rounding), min_bound, max_bound) for x in predicted_scores]
     return predicted_scores
 
 class Metric:
@@ -272,6 +272,7 @@ class SmatchOfficial(Metric):
             initialized node mapping between two AMRs
         """
         if self._random_seed is not None:
+            assert isinstance(self._random_seed, int)
             random.seed(self._random_seed)
         else:
             random.seed()
@@ -324,6 +325,7 @@ class SmatchOfficial(Metric):
         """
         # if needed, a fixed seed could be passed here to generate same random (to help debugging)
         if self._random_seed is not None:
+            assert isinstance(self._random_seed, int)
             random.seed(self._random_seed)
         else:
             random.seed()

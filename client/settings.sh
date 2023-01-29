@@ -1,7 +1,7 @@
 #!/bin/bash
 
 FOLDER_SPRING=/home/grandi/project/server/spring #
-PATH_MODEL=${FOLDER_SPRING}/AMR3.parsing.pt
+PATH_MODEL=${FOLDER_SPRING}/checkpoints/AMR3.parsing.pt
 PATH_AMR_SENTS=/home/grandi/project/graphs
 PATH_DOC_SENTS=/home/grandi/project/documents
 

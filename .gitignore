@@ -131,7 +131,8 @@ dmypy.json
 *slurm-*.out*
 *.parsing.pt
 documents/*
-amrs_graph/*
+graphs/*
 test_*
+checkpoints/*
 
 .DS_Store
