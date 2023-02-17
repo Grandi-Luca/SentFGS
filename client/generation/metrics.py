@@ -1040,8 +1040,8 @@ class Sema(Metric):
     def predict_score(self, f1: str, f2: str, round: int = 4) -> float:
         logging.basicConfig(level=logging.ERROR)
         logger = logging.getLogger(__name__)
-        test = codecs.open('amrs_graph/8_summary_0.amr.txt', 'r', 'utf-8')
-        gold = codecs.open('amrs_graph/8_summary_0.amr.txt', 'r', 'utf-8')
+        test = codecs.open(f1, 'r', 'utf-8')
+        gold = codecs.open(f2, 'r', 'utf-8')
         sema = Sema()
         flag = False
 
