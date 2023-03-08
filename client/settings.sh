@@ -27,4 +27,4 @@ python3 -u init_model_inside_server.py \
   --amrs-folder ${PATH_AMR_SENTS}
 
 # run the experiments
-python3 -u test_generation.py ${PATH_AMR_SENTS}
+python3 -u test_generation.py ${PATH_AMR_SENTS} ${PATH_DOC_SENTS}
