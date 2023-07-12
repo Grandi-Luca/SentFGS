@@ -8,7 +8,7 @@ ARG PATH="/root/miniconda3/bin:${PATH}"
 
 RUN apt-get update && apt-get -y upgrade \
     && apt-get install -y --no-install-recommends \
-    git \
+    git \ 
     wget \
     g++ \
     ca-certificates \
