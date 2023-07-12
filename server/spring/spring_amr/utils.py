@@ -12,6 +12,7 @@ from spring_amr.tokenization_bart import AMRBartTokenizer, PENMANBartTokenizer
 def instantiate_model_and_tokenizer(
         name=None,
         checkpoint=None,
+        config_path=None,
         additional_tokens_smart_init=True,
         dropout = 0.15,
         attention_dropout = 0.15,
@@ -35,7 +36,10 @@ def instantiate_model_and_tokenizer(
     else:
         tokenizer_name = name
 
-    config = AutoConfig.from_pretrained(name)
+    if config_path is None:
+        config = AutoConfig.from_pretrained(name)
+    else:
+        config = AutoConfig.from_pretrained(config_path)
     config.output_past = False
     config.no_repeat_ngram_size = 0
     config.prefix = " "

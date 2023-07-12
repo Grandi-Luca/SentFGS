@@ -1,7 +1,7 @@
 import numpy as np
 import random
 import sys
-from typing import Optional, List
+from typing import Optional, List, Dict
 from amr_utils.amr_readers import AMR_Reader
 from amr_utils.graph_utils import get_node_alignment
 from smatch import amr
@@ -11,6 +11,7 @@ import weisfeiler_leman_amr_metrics.src.graph_helpers as gh
 import codecs
 import logging
 from sema.amr import AMR
+from factgraph.evaluate import evaluate
 
 def new_range(val, old_min_bound: int, old_max_bound: int):
     new_min_bound = -1
@@ -23,14 +24,14 @@ def final_score(predicted_scores: List[int], rounding: int, min_bound: int=0, ma
     predicted_scores = [new_range(np.round(x, rounding), min_bound, max_bound) for x in predicted_scores]
     return predicted_scores
 
-class Metric:
+class AMRScorer:
     def predict_score(self, f1:str, f2:str, round:int=4)->float:
         """Method for execute similarity matching between two amr graphs."""
         raise NotImplementedError(
             f"{self.__class__} is an abstract class. Only classes inheriting this class can be called."
         )
 
-class SmatchAMRUtils(Metric):
+class SmatchAMRUtils(AMRScorer):
     def __init__(self):
         self._reader = AMR_Reader()
 
@@ -46,7 +47,7 @@ class SmatchAMRUtils(Metric):
         
         return final_score(preds, round)
 
-class SmatchOfficial(Metric):
+class SmatchOfficial(AMRScorer):
     def __init__(self, random_seed: Optional[int]=None):
         # total number of iteration in smatch computation
         self.iteration_num = 5
@@ -789,7 +790,7 @@ class SmatchOfficial(Metric):
         f2.close()
         return final_score(preds, round)
 
-class WWLK(Metric):
+class WWLK(AMRScorer):
     def __init__(self, input_format:str='penman', edge_to_node_transform:bool=False, 
                 iter:int=2, stability_level:int=0, random_init_relation:str='min_entropy',
                 w2v_uri:str='glove-wiki-gigaword-100', random_seed: Optional[int]=None):
@@ -819,7 +820,7 @@ class WWLK(Metric):
 """
 This script calculates SEMA score between two AMRs
 """
-class Sema(Metric):
+class Sema(AMRScorer):
     """
     SEMA: an Extended Semantic Metric Evaluation for AMR.
     """
@@ -1090,3 +1091,26 @@ class Sema(Metric):
             f1_scores.append(f1)
 
         return final_score(f1_scores, round)
+    
+class FactGraph(AMRScorer):
+    """
+    FactGraph: Evaluating Factuality in Summarization with Semantic Graph Representations.
+    """
+
+    def __init__(self,
+                 model,
+                 tokenizer,
+                 num_document_graphs: int = 5,
+        ):
+        """
+        Constructor. Initiates the variables
+        """
+        #
+        self.model = model
+        self.tokenizer = tokenizer
+        self.num_document_graphs = num_document_graphs
+
+    def predict_score(self, data: Dict, summ_location, amr_graphs) -> float:
+        pred = evaluate(data, self.model, self.tokenizer,
+                        self.num_document_graphs, summ_location, amr_graphs)
+        return pred

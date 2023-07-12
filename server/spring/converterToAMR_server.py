@@ -5,6 +5,7 @@ import torch
 from spring_amr.penman import encode
 from spring_amr.utils import instantiate_model_and_tokenizer
 
+import sys
 import os
 import logging
 from typing import Optional, List
@@ -23,6 +24,7 @@ def _setup_model_and_tokenizer(
     model_name: Optional[str] = None,
     penman_linearization: Optional[bool] = None,
     use_pointer_tokens: Optional[bool] = None,
+    config_path: Optional[str] = None,
 ):
     global AMRS_FOLDER
     global model
@@ -35,6 +37,7 @@ def _setup_model_and_tokenizer(
         attention_dropout=0,
         penman_linearization=penman_linearization,
         use_pointer_tokens=use_pointer_tokens,
+        config_path=config_path,
     )
     model.load_state_dict(torch.load(checkpoint, map_location='cpu')['model'])
     model.to(device)
@@ -144,7 +147,7 @@ def predict_amrs_from_plaintext(
                 
             if output_path is not None:
                 with open(output_path, 'w') as out_file:
-                    out_file.write('\n'.join(final_penman_graphs))
+                    out_file.write('\n\n'.join(final_penman_graphs))
 
         break
 
@@ -171,12 +174,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             model_name = queries.get('model_name', [])
             checkpoint = queries.get('checkpoint', [])
             amrs_folder = queries.get('amrs_folder', [])
+            config_path = queries.get('config_path', [])
             penman_linearization = queries.get('penman_linearization', [0])
             use_pointer_tokens = queries.get('use_pointer_tokens', [0])
 
             model_name = model_name[0] if len(model_name) > 0 else None
             checkpoint = checkpoint[0] if len(checkpoint) > 0 else None
             amrs_folder = amrs_folder[0] if len(amrs_folder) > 0 else None
+            config_path = config_path[0] if len(config_path) > 0 else None
             penman_linearization = int(penman_linearization[0]) > 0
             use_pointer_tokens = int(use_pointer_tokens[0]) > 0
 
@@ -191,6 +196,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 amrs_folder=amrs_folder, 
                 penman_linearization=penman_linearization, 
                 use_pointer_tokens=use_pointer_tokens,
+                config_path=config_path,
                 )
         
         if 'predict_amrs_from_plaintext' in url_parsed.path:
@@ -233,14 +239,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
             except Exception as e:
                 self._set_response()
-                logging.error(e)
-                self.wfile.write(f"e".encode('utf-8'))
+                self.wfile.write(f"{e}".encode('utf-8'))
                 return
         self._set_response()
         self.wfile.write(f"{output_path}".encode('utf-8'))
 
 def run(server_class=HTTPServer, handler_class=RequestHandler, port=8080):
-    logging.basicConfig(level=logging.ERROR)
+    logging.basicConfig(level=logging.WARNING)
     server_address = ('', port)
     httpd = server_class(server_address, handler_class)
     while keep_running():
@@ -251,5 +256,5 @@ def run(server_class=HTTPServer, handler_class=RequestHandler, port=8080):
     httpd.server_close()
 
 if __name__ == '__main__':
-    run(port=1234)
-
+    port = int(sys.argv[1])
+    run(port=port)
